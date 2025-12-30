@@ -87,6 +87,14 @@ const safeJsonParse = (raw, fallback) => {
   }
 };
 
+const normalizeWordInput = (raw, { trimEnd = false } = {}) => {
+  const trimmedStart = (raw ?? "").replace(/^\s+/, "");
+  const collapsed = trimmedStart.replace(/\s{2,}/g, " ");
+  const trimmed = trimEnd ? collapsed.replace(/\s+$/g, "") : collapsed;
+  const withoutDots = trimmed.replace(/\./g, "");
+  return withoutDots.replace(/\b[a-z]/g, (m) => m.toUpperCase());
+};
+
 // 🔊 Pronunciation (used in Review only)
 function speakWord(text) {
   if (typeof window === "undefined") return;
@@ -172,6 +180,11 @@ function normalizeCards(input) {
   });
 }
 
+const displayDefinition = (def) => {
+  const clean = String(def ?? "").trim();
+  return clean || "(no definition)";
+};
+
 function clampWords(text, maxWords) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
@@ -227,7 +240,7 @@ function CardView({ card }) {
         <div style={styles.cardWord}>{card.word}</div>
       </div>
 
-      <div style={styles.cardDef}>{card.definition}</div>
+      <div style={styles.cardDef}>{displayDefinition(card.definition)}</div>
 
       {examples.length > 0 && (
         <div style={styles.block}>
@@ -256,6 +269,7 @@ export default function App() {
   // AI Fill UI state
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
+  const [editingId, setEditingId] = useState(null);
 
   // AI cache - same word => same output on repeat clicks
   const [aiCache, setAiCache] = useState({});
@@ -382,7 +396,9 @@ export default function App() {
 
   // AI Fill: cached per word so repeat clicks keep the same result
   const aiFill = useCallback(async () => {
-    const w = word.trim();
+    const normalizedWord = normalizeWordInput(word, { trimEnd: true });
+    if (normalizedWord !== word) setWord(normalizedWord);
+    const w = normalizedWord;
     if (!w) return;
 
     const key = w.toLowerCase();
@@ -450,9 +466,11 @@ export default function App() {
   }, [word, aiCache]);
 
   const saveCard = useCallback(() => {
-    const w = word.trim();
+    const normalizedWord = normalizeWordInput(word, { trimEnd: true });
+    if (normalizedWord !== word) setWord(normalizedWord);
+    const w = normalizedWord;
     const d = definition.trim();
-    if (!w || !d) return;
+    if (!w) return;
 
     const examples = examplesText
       .split("\n")
@@ -460,22 +478,43 @@ export default function App() {
       .filter(Boolean)
       .slice(0, 2);
 
-    const newCard = {
-      id: uid(),
-      word: w,
-      definition: clampWords(d, 14),
-      examples: ensureTwoExamples(examples.map((t) => clampWords(t, 12)), w),
-      srs: { dueMs: startOfLocalDayMs(), intervalDays: 0, ease: 2.5, reps: 0 },
-    };
+    const nextDefinition = clampWords(d, 14);
+    const nextExamples =
+      examples.length > 0 ? examples.map((t) => clampWords(t, 12)) : [];
 
-    setCards((prev) => [newCard, ...prev]);
+    if (editingId) {
+      setCards((prev) =>
+        prev.map((c) =>
+          c.id === editingId
+            ? { ...c, word: w, definition: nextDefinition, examples: nextExamples }
+            : c
+        )
+      );
+    } else {
+      const newCard = {
+        id: uid(),
+        word: w,
+        definition: nextDefinition,
+        examples: nextExamples,
+        srs: { dueMs: startOfLocalDayMs(), intervalDays: 0, ease: 2.5, reps: 0 },
+      };
+
+      setCards((prev) => [newCard, ...prev]);
+      setStudyQueueIds((prev) =>
+        prev.includes(newCard.id) ? prev : [...prev, newCard.id]
+      );
+      setReviewId(newCard.id);
+    }
 
     setWord("");
     setDefinition("");
     setExamplesText("");
     setAiError("");
+    if (editingId) {
+      setEditingId(null);
+    }
     setTab("deck");
-  }, [word, definition, examplesText]);
+  }, [word, definition, examplesText, editingId]);
 
   // REVIEW: Keep = rotate to end in study mode; otherwise move pointer to next due
   const keepInReview = useCallback(() => {
@@ -490,6 +529,7 @@ export default function App() {
         const next = [...prev];
         const [picked] = next.splice(idx, 1);
         next.push(picked);
+        setReviewId(next[0] || null);
         return next;
       });
       return;
@@ -497,6 +537,7 @@ export default function App() {
 
     const idx = reviewIds.indexOf(reviewId);
     if (idx === -1 || reviewIds.length === 0) return;
+    setCards((prev) => prev.map((c) => (c.id === reviewId ? schedule(c, 1) : c)));
     setReviewId(reviewIds[(idx + 1) % reviewIds.length]);
   }, [reviewId, studyQueueIds, reviewIds]);
 
@@ -508,15 +549,38 @@ export default function App() {
     setShowAnswer(false);
   }, [reviewId]);
 
-  const studyCard = useCallback((id) => {
-    setStudyQueueIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
-  }, []);
+  const toggleStudyCard = useCallback(
+    (id) => {
+      setStudyQueueIds((prev) => {
+        if (!prev.includes(id)) return [...prev, id];
+        const next = prev.filter((x) => x !== id);
+        setCards((cardsPrev) =>
+          cardsPrev.map((c) => (c.id === id ? schedule(c, 2) : c))
+        );
+        if (reviewId === id) {
+          setReviewId(next[0] ?? null);
+          setShowAnswer(false);
+        }
+        return next;
+      });
+    },
+    [reviewId]
+  );
 
   const deleteCard = useCallback((id) => {
     setCards((prev) => prev.filter((c) => c.id !== id));
     setStudyQueueIds((prev) => prev.filter((x) => x !== id));
     setReviewId((prevId) => (prevId === id ? null : prevId));
     setShowAnswer(false);
+  }, []);
+
+  const editCard = useCallback((card) => {
+    setWord(card.word || "");
+    setDefinition(card.definition || "");
+    setExamplesText((card.examples || []).slice(0, 2).join("\n"));
+    setAiError("");
+    setEditingId(card.id || null);
+    setTab("add");
   }, []);
 
   const filtered = useMemo(() => {
@@ -644,20 +708,31 @@ export default function App() {
                 <div style={styles.section}>
                   <div style={styles.addWrap}>
                     <div style={styles.addPanel}>
-                      <div style={styles.addTopRow}>
-                        <div style={{ ...styles.field, minWidth: 220 }}>
-                          <div style={styles.label}>Word</div>
-                          <input
-                            style={styles.input}
-                            placeholder="e.g., aileron"
-                            value={word}
-                            onChange={(e) => {
-                              setWord(e.target.value);
-                              if (aiError) setAiError("");
-                            }}
-                          />
-                        </div>
-
+                      <div style={{ ...styles.field, minWidth: 220 }}>
+                        <div style={styles.label}>Word</div>
+                        <input
+                          style={styles.input}
+                          placeholder="e.g., aileron"
+                          value={word}
+                          autoCorrect="off"
+                          autoCapitalize="off"
+                          autoComplete="off"
+                          spellCheck={false}
+                          onKeyDown={(e) => {
+                            if (e.key === " " && word.endsWith(" ")) {
+                              e.preventDefault();
+                            }
+                          }}
+                          onChange={(e) => {
+                            const normalized = normalizeWordInput(e.target.value);
+                            setWord(normalized);
+                            if (aiError) setAiError("");
+                          }}
+                          onBlur={() => {
+                            const normalized = normalizeWordInput(word, { trimEnd: true });
+                            if (normalized !== word) setWord(normalized);
+                          }}
+                        />
                       </div>
 
                       <div style={styles.field}>
@@ -682,13 +757,24 @@ export default function App() {
 
                       <div style={styles.addActionsRow}>
                         <button
-                          style={{ ...styles.primaryBtn, minWidth: 120 }}
+                          style={
+                            editingId && !word.trim()
+                              ? {
+                                  ...styles.secondaryBtn,
+                                  minWidth: 120,
+                                  color: "#0B0F14",
+                                  background: styles.secondaryBtn.background,
+                                  opacity: 1,
+                                  cursor: "not-allowed",
+                                }
+                              : { ...styles.primaryBtn, minWidth: 120 }
+                          }
                           onClick={saveCard}
                           type="button"
-                          disabled={!word.trim() || !definition.trim()}
-                          title="Save this card"
+                          disabled={!word.trim()}
+                          title={editingId ? "Save changes" : "Save this card"}
                         >
-                          Add card
+                          {editingId ? "Save" : "Add card"}
                         </button>
 
                         <button
@@ -748,17 +834,26 @@ export default function App() {
                           <div key={c.id} style={styles.deckRow}>
                             <div style={styles.deckLeft}>
                               <div style={styles.deckWord}>{c.word}</div>
-                              <div style={styles.deckDef}>{c.definition}</div>
+                              <div style={styles.deckDef}>{displayDefinition(c.definition)}</div>
                             </div>
 
                             <div style={styles.deckActions}>
                               <button
                                 style={queued ? styles.studyBtnQueued : styles.studyBtn}
                                 type="button"
-                                onClick={() => studyCard(c.id)}
-                                title={queued ? "Already in study queue" : "Add to study queue"}
+                                onClick={() => toggleStudyCard(c.id)}
+                                title={queued ? "Remove from study queue" : "Add to study queue"}
                               >
                                 {queued ? "Queued" : "Study"}
+                              </button>
+
+                              <button
+                                style={styles.secondaryBtn}
+                                type="button"
+                                onClick={() => editCard(c)}
+                                title="Edit this card"
+                              >
+                                Edit
                               </button>
 
                               <button
@@ -1020,12 +1115,6 @@ const styles = {
     display: "flex",
     flexDirection: "column",
     gap: 14,
-  },
-  addTopRow: {
-    display: "grid",
-    gridTemplateColumns: "minmax(220px, 1fr) auto",
-    gap: 12,
-    alignItems: "end",
   },
   addActionsRow: {
     display: "flex",
