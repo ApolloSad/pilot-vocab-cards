@@ -8,10 +8,10 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
  * - Bottom bar removed (clean/minimal)
  * - AI Fill button (Cloudflare Pages Functions -> /api/define?word=...)
  *
- * Current baseline:
+ * Baseline:
  * - Russian removed everywhere
  * - AI Fill cached per word (repeat clicks keep the same best output)
- * - Add tab styled to match Review/Deck (no green tint, minimal)
+ * - Add tab redesigned to match Review/Deck (minimal, centered, no green tint)
  */
 
 const LEGACY_LS_KEY = "pilotVocabCards_v8";
@@ -639,73 +639,84 @@ export default function App() {
                 </div>
               )}
 
-              {/* ADD */}
+              {/* ADD (redesigned) */}
               {tab === "add" && (
                 <div style={styles.section}>
-                  <div style={styles.addCard}>
-                    <div style={styles.field}>
-                      <div style={styles.label}>Word</div>
-                      <input
-                        style={styles.input}
-                        placeholder="e.g., aileron"
-                        value={word}
-                        onChange={(e) => {
-                          setWord(e.target.value);
-                          if (aiError) setAiError("");
-                        }}
-                      />
+                  <div style={styles.addWrap}>
+                    <div style={styles.card}>
+                      <div style={styles.addTopRow}>
+                        <div style={{ ...styles.field, flex: "1 1 auto", minWidth: 220 }}>
+                          <div style={styles.label}>Word</div>
+                          <input
+                            style={styles.input}
+                            placeholder="e.g., aileron"
+                            value={word}
+                            onChange={(e) => {
+                              setWord(e.target.value);
+                              if (aiError) setAiError("");
+                            }}
+                          />
+                        </div>
+
+                        <button
+                          style={styles.secondaryBtn}
+                          onClick={aiFill}
+                          type="button"
+                          disabled={aiLoading || !word.trim()}
+                          title="Auto-fill definition and examples using AI"
+                        >
+                          {aiLoading ? "AI..." : "AI Fill"}
+                        </button>
+                      </div>
+
+                      <div style={styles.field}>
+                        <div style={styles.label}>Definition</div>
+                        <input
+                          style={styles.input}
+                          placeholder="One short meaning"
+                          value={definition}
+                          onChange={(e) => setDefinition(e.target.value)}
+                        />
+                      </div>
+
+                      <div style={styles.field}>
+                        <div style={styles.label}>Examples</div>
+                        <textarea
+                          style={styles.textarea}
+                          placeholder={"Example 1\nExample 2"}
+                          value={examplesText}
+                          onChange={(e) => setExamplesText(e.target.value)}
+                        />
+                      </div>
+
+                      <div style={styles.addActionsRow}>
+                        <button
+                          style={styles.primaryBtn}
+                          onClick={saveCard}
+                          type="button"
+                          disabled={!word.trim() || !definition.trim()}
+                          title="Save this card"
+                        >
+                          Add card
+                        </button>
+
+                        <button
+                          style={styles.secondaryBtn}
+                          type="button"
+                          onClick={() => {
+                            setWord("");
+                            setDefinition("");
+                            setExamplesText("");
+                            setAiError("");
+                          }}
+                          title="Clear fields"
+                        >
+                          Clear
+                        </button>
+                      </div>
+
+                      {!!aiError && <div style={styles.errorBox}>{aiError}</div>}
                     </div>
-
-                    <div style={styles.field}>
-                      <div style={styles.label}>Definition</div>
-                      <input
-                        style={styles.input}
-                        placeholder="One short meaning"
-                        value={definition}
-                        onChange={(e) => setDefinition(e.target.value)}
-                      />
-                    </div>
-
-                    <div style={styles.field}>
-                      <div style={styles.label}>Examples</div>
-                      <textarea
-                        style={styles.textarea}
-                        placeholder={"Example 1\nExample 2"}
-                        value={examplesText}
-                        onChange={(e) => setExamplesText(e.target.value)}
-                      />
-                    </div>
-
-                    <div style={styles.actions}>
-                      <button style={styles.primaryBtn} onClick={saveCard} type="button">
-                        Add card
-                      </button>
-
-                      <button
-                        style={styles.secondaryBtn}
-                        onClick={aiFill}
-                        type="button"
-                        disabled={aiLoading || !word.trim()}
-                        title="Auto-fill definition and examples using AI"
-                      >
-                        {aiLoading ? "AI..." : "AI Fill"}
-                      </button>
-
-                      <button
-                        style={styles.secondaryBtn}
-                        type="button"
-                        onClick={() => {
-                          setWord("");
-                          setDefinition("");
-                          setExamplesText("");
-                          setAiError("");
-                        }}
-                      >
-                        Clear
-                      </button>
-                    </div>
-
-                    {!!aiError && <div style={styles.errorBox}>{aiError}</div>}
                   </div>
                 </div>
               )}
@@ -996,17 +1007,24 @@ const styles = {
     fontWeight: 950,
   },
 
-  // Add card - same style family as Review card, no green tint
-  addCard: {
-    borderRadius: 18,
-    border: `1px solid ${BORDER}`,
-    background: SURFACE,
-    padding: 14,
-    boxShadow: "0 10px 30px rgba(11, 15, 20, 0.08)",
+  // ADD layout helpers
+  addWrap: {
     display: "flex",
-    flexDirection: "column",
+    justifyContent: "center",
+    width: "100%",
+  },
+  addTopRow: {
+    display: "flex",
     gap: 12,
-    maxWidth: 820,
+    alignItems: "flex-end",
+    flexWrap: "wrap",
+  },
+  addActionsRow: {
+    display: "flex",
+    gap: 10,
+    flexWrap: "wrap",
+    justifyContent: "flex-start",
+    marginTop: 2,
   },
 
   field: { display: "flex", flexDirection: "column", gap: 8 },
@@ -1044,8 +1062,6 @@ const styles = {
     fontWeight: 750,
     lineHeight: 1.4,
   },
-
-  actions: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 },
 
   errorBox: {
     marginTop: 6,
@@ -1118,6 +1134,8 @@ const styles = {
     background: SURFACE,
     padding: 14,
     boxShadow: "0 10px 30px rgba(11, 15, 20, 0.08)",
+    maxWidth: 860,
+    width: "100%",
   },
   cardTop: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 },
   cardWord: { fontSize: 22, fontWeight: 1000 },
