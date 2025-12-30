@@ -8,14 +8,13 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
  * - Bottom bar removed (clean/minimal)
  * - AI Fill button (Cloudflare Pages Functions -> /api/define?word=...)
  *
- * Updates in this version:
- * - Russian translation removed everywhere (data model + UI)
- * - Add UI cleaned and rescaled
+ * Current baseline:
+ * - Russian removed everywhere
  * - AI Fill cached per word (repeat clicks keep the same best output)
- * - AI is instructed to give aviation meaning if relevant, otherwise general meaning
+ * - Add tab styled to match Review/Deck (no green tint, minimal)
  */
 
-const LEGACY_LS_KEY = "pilotVocabCards_v8"; // old app saved here
+const LEGACY_LS_KEY = "pilotVocabCards_v8";
 const DB_NAME = "pilot-vocab-cards-db";
 const DB_STORE = "kv";
 const DB_CARDS_KEY = "cards_v1";
@@ -173,25 +172,6 @@ function normalizeCards(input) {
   });
 }
 
-function normalizeAiPayload(data, fallbackWord) {
-  const def = String(data?.definition || "").trim();
-  const ex = Array.isArray(data?.examples) ? data.examples : [];
-
-  const examples = ex
-    .map((x) => String(x || "").trim())
-    .filter(Boolean)
-    .slice(0, 2);
-
-  // Safety: keep output simple and short
-  const cleanDefinition = clampWords(def, 14);
-  const cleanExamples = ensureTwoExamples(
-    examples.map((t) => clampWords(t, 12)),
-    fallbackWord
-  );
-
-  return { definition: cleanDefinition, examples: cleanExamples };
-}
-
 function clampWords(text, maxWords) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   if (!t) return "";
@@ -209,6 +189,25 @@ function ensureTwoExamples(examples, word) {
   const out = Array.isArray(examples) ? examples.filter(Boolean) : [];
   while (out.length < 2) out.push(base[out.length] || base[0]);
   return out.slice(0, 2);
+}
+
+function normalizeAiPayload(data, fallbackWord) {
+  const def = String(data?.definition || "").trim();
+  const ex = Array.isArray(data?.examples) ? data.examples : [];
+
+  const examples = ex
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  // Safety: keep output simple and short
+  const cleanDefinition = clampWords(def, 14);
+  const cleanExamples = ensureTwoExamples(
+    examples.map((t) => clampWords(t, 12)),
+    fallbackWord
+  );
+
+  return { definition: cleanDefinition, examples: cleanExamples };
 }
 
 // ---------- UI ----------
@@ -258,8 +257,7 @@ export default function App() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
 
-  // AI cache - keep same "best" output if AI Fill clicked repeatedly for same word
-  // Shape: { [lowerWord]: { definition: string, examples: string[] } }
+  // AI cache - same word => same output on repeat clicks
   const [aiCache, setAiCache] = useState({});
 
   const [showAnswer, setShowAnswer] = useState(false);
@@ -269,7 +267,7 @@ export default function App() {
 
   const [hydrated, setHydrated] = useState(false);
 
-  // LOAD: IndexedDB first. If empty, import from old localStorage automatically.
+  // LOAD
   useEffect(() => {
     if (typeof window === "undefined") return;
 
@@ -283,7 +281,7 @@ export default function App() {
         const loadedQueue = safeJsonParse(rawQueue, []);
         const loadedAiCache = safeJsonParse(rawAiCache, {});
 
-        // If DB empty -> try legacy localStorage import once
+        // If DB empty -> import from legacy localStorage once
         if (loadedCards.length === 0) {
           const legacyRaw = localStorage.getItem(LEGACY_LS_KEY);
           const legacyParsed = safeJsonParse(legacyRaw, []);
@@ -291,7 +289,7 @@ export default function App() {
 
           if (legacyNormalized.length > 0) {
             setCards(legacyNormalized);
-            setStudyQueueIds([]); // old app didn't persist queue
+            setStudyQueueIds([]);
             setAiCache(typeof loadedAiCache === "object" && loadedAiCache ? loadedAiCache : {});
             await idbSet(DB_CARDS_KEY, JSON.stringify(legacyNormalized));
             await idbSet(DB_QUEUE_KEY, JSON.stringify([]));
@@ -306,7 +304,7 @@ export default function App() {
         setAiCache(typeof loadedAiCache === "object" && loadedAiCache ? loadedAiCache : {});
         setHydrated(true);
       } catch {
-        // If IndexedDB fails (rare), fallback to localStorage (best effort)
+        // Fallback (best effort)
         const legacyRaw = localStorage.getItem(LEGACY_LS_KEY);
         const legacyParsed = safeJsonParse(legacyRaw, []);
         setCards(normalizeCards(legacyParsed));
@@ -317,7 +315,7 @@ export default function App() {
     })();
   }, []);
 
-  // SAVE: cards to IndexedDB (only after load)
+  // SAVE: cards
   useEffect(() => {
     if (!hydrated) return;
     if (typeof window === "undefined") return;
@@ -325,13 +323,11 @@ export default function App() {
     (async () => {
       try {
         await idbSet(DB_CARDS_KEY, JSON.stringify(cards));
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
   }, [cards, hydrated]);
 
-  // SAVE: queue to IndexedDB
+  // SAVE: queue
   useEffect(() => {
     if (!hydrated) return;
     if (typeof window === "undefined") return;
@@ -339,13 +335,11 @@ export default function App() {
     (async () => {
       try {
         await idbSet(DB_QUEUE_KEY, JSON.stringify(studyQueueIds));
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
   }, [studyQueueIds, hydrated]);
 
-  // SAVE: AI cache to IndexedDB
+  // SAVE: AI cache
   useEffect(() => {
     if (!hydrated) return;
     if (typeof window === "undefined") return;
@@ -353,9 +347,7 @@ export default function App() {
     (async () => {
       try {
         await idbSet(DB_AI_CACHE_KEY, JSON.stringify(aiCache));
-      } catch {
-        // ignore
-      }
+      } catch {}
     })();
   }, [aiCache, hydrated]);
 
@@ -388,7 +380,7 @@ export default function App() {
     setShowAnswer(false);
   }, [tab, reviewIds, reviewId]);
 
-  // AI Fill: cached per word so repeated clicks keep the same best output
+  // AI Fill: cached per word so repeat clicks keep the same result
   const aiFill = useCallback(async () => {
     const w = word.trim();
     if (!w) return;
@@ -408,11 +400,12 @@ export default function App() {
     try {
       const tryUrls = [
         `/api/define?word=${encodeURIComponent(w)}`,
-        // fallback for local Vite dev if you do not proxy Pages Functions
-        ...(import.meta.env.DEV ? [`https://pilot-vocab-cards.pages.dev/api/define?word=${encodeURIComponent(w)}`] : []),
+        ...(import.meta.env.DEV
+          ? [`https://pilot-vocab-cards.pages.dev/api/define?word=${encodeURIComponent(w)}`]
+          : []),
       ];
 
-      let res = null;
+      let ok = false;
       let lastErr = "";
 
       for (const url of tryUrls) {
@@ -430,10 +423,8 @@ export default function App() {
           if (!r.ok) throw new Error(data?.error || "AI error");
 
           const normalized = normalizeAiPayload(data, w);
-
           if (!normalized.definition) throw new Error("Empty definition");
 
-          // Apply and persist cache
           setDefinition(normalized.definition);
           setExamplesText(normalized.examples.join("\n"));
 
@@ -442,16 +433,15 @@ export default function App() {
             [key]: { definition: normalized.definition, examples: normalized.examples },
           }));
 
-          res = r;
+          ok = true;
           lastErr = "";
           break;
         } catch (e) {
           lastErr = e?.message || "AI fill failed";
-          // try next url
         }
       }
 
-      if (!res) throw new Error(lastErr || "AI fill failed");
+      if (!ok) throw new Error(lastErr || "AI fill failed");
     } catch (e) {
       setAiError(e?.message || "AI fill failed");
     } finally {
@@ -583,7 +573,7 @@ export default function App() {
           </div>
 
           <div style={styles.frameBody}>
-            <div style={tab === "add" ? styles.contentAdd : styles.content}>
+            <div style={styles.content}>
               {/* REVIEW */}
               {tab === "review" && (
                 <div style={styles.section}>
@@ -652,40 +642,38 @@ export default function App() {
               {/* ADD */}
               {tab === "add" && (
                 <div style={styles.section}>
-                  <div style={styles.formCard}>
-                    <div style={styles.formGrid}>
-                      <div style={styles.field}>
-                        <div style={styles.label}>Word</div>
-                        <input
-                          style={styles.inputLarge}
-                          placeholder="e.g., aileron"
-                          value={word}
-                          onChange={(e) => {
-                            setWord(e.target.value);
-                            if (aiError) setAiError("");
-                          }}
-                        />
-                      </div>
+                  <div style={styles.addCard}>
+                    <div style={styles.field}>
+                      <div style={styles.label}>Word</div>
+                      <input
+                        style={styles.input}
+                        placeholder="e.g., aileron"
+                        value={word}
+                        onChange={(e) => {
+                          setWord(e.target.value);
+                          if (aiError) setAiError("");
+                        }}
+                      />
+                    </div>
 
-                      <div style={styles.field}>
-                        <div style={styles.label}>Definition</div>
-                        <input
-                          style={styles.inputLarge}
-                          placeholder="One short meaning"
-                          value={definition}
-                          onChange={(e) => setDefinition(e.target.value)}
-                        />
-                      </div>
+                    <div style={styles.field}>
+                      <div style={styles.label}>Definition</div>
+                      <input
+                        style={styles.input}
+                        placeholder="One short meaning"
+                        value={definition}
+                        onChange={(e) => setDefinition(e.target.value)}
+                      />
+                    </div>
 
-                      <div style={{ ...styles.field, gridColumn: "1 / -1" }}>
-                        <div style={styles.label}>Examples</div>
-                        <textarea
-                          style={styles.textareaLarge}
-                          placeholder={"Example 1\nExample 2"}
-                          value={examplesText}
-                          onChange={(e) => setExamplesText(e.target.value)}
-                        />
-                      </div>
+                    <div style={styles.field}>
+                      <div style={styles.label}>Examples</div>
+                      <textarea
+                        style={styles.textarea}
+                        placeholder={"Example 1\nExample 2"}
+                        value={examplesText}
+                        onChange={(e) => setExamplesText(e.target.value)}
+                      />
                     </div>
 
                     <div style={styles.actions}>
@@ -717,15 +705,7 @@ export default function App() {
                       </button>
                     </div>
 
-                    {!!aiError && (
-                      <div style={styles.errorBox}>
-                        {aiError}
-                      </div>
-                    )}
-
-                    <div style={styles.hint}>
-                      Tip: AI Fill is cached. Clicking again keeps the same best result.
-                    </div>
+                    {!!aiError && <div style={styles.errorBox}>{aiError}</div>}
                   </div>
                 </div>
               )}
@@ -796,7 +776,7 @@ export default function App() {
 }
 
 // ---------- Minimalist Color Palette tokens ----------
-const ACCENT = "#00ff66"; // toxic green accent (minimal use)
+const ACCENT = "#00ff66";
 const BG = "#F6F7F9";
 const SURFACE = "#FFFFFF";
 const SURFACE_2 = "#F1F3F5";
@@ -944,16 +924,6 @@ const styles = {
     gap: 14,
   },
 
-  // Slightly narrower for Add so it looks tighter and "perfect"
-  contentAdd: {
-    maxWidth: 860,
-    margin: "0 auto",
-    minHeight: "100%",
-    display: "flex",
-    flexDirection: "column",
-    gap: 14,
-  },
-
   section: { display: "flex", flexDirection: "column", gap: 14 },
 
   empty: {
@@ -1026,18 +996,19 @@ const styles = {
     fontWeight: 950,
   },
 
-  formCard: {
+  // Add card - same style family as Review card, no green tint
+  addCard: {
     borderRadius: 18,
     border: `1px solid ${BORDER}`,
-    background: "linear-gradient(180deg, rgba(0,255,102,0.06), rgba(0,0,0,0.00))",
+    background: SURFACE,
     padding: 14,
+    boxShadow: "0 10px 30px rgba(11, 15, 20, 0.08)",
+    display: "flex",
+    flexDirection: "column",
+    gap: 12,
+    maxWidth: 820,
   },
 
-  formGrid: {
-    display: "grid",
-    gridTemplateColumns: "1fr 1fr",
-    gap: 12,
-  },
   field: { display: "flex", flexDirection: "column", gap: 8 },
   label: {
     fontSize: 12,
@@ -1059,23 +1030,10 @@ const styles = {
     fontWeight: 750,
   },
 
-  inputLarge: {
+  textarea: {
     width: "100%",
     boxSizing: "border-box",
-    padding: "14px 12px",
-    borderRadius: 14,
-    border: `1px solid ${BORDER}`,
-    background: SURFACE,
-    color: TEXT,
-    outline: "none",
-    fontWeight: 800,
-    fontSize: 15,
-  },
-
-  textareaLarge: {
-    width: "100%",
-    boxSizing: "border-box",
-    padding: "14px 12px",
+    padding: "12px 12px",
     borderRadius: 14,
     border: `1px solid ${BORDER}`,
     background: SURFACE,
@@ -1085,26 +1043,18 @@ const styles = {
     resize: "vertical",
     fontWeight: 750,
     lineHeight: 1.4,
-    fontSize: 14,
   },
 
-  actions: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 },
+  actions: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 2 },
 
   errorBox: {
-    marginTop: 12,
+    marginTop: 6,
     padding: 12,
     borderRadius: 14,
     border: "1px solid rgba(220, 20, 60, 0.35)",
     background: "rgba(220, 20, 60, 0.08)",
     color: "crimson",
     fontWeight: 900,
-  },
-
-  hint: {
-    marginTop: 10,
-    color: MUTED,
-    fontWeight: 800,
-    fontSize: 12,
   },
 
   searchRow: { display: "flex" },
