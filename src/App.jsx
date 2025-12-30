@@ -96,6 +96,40 @@ const normalizeWordInput = (raw, { trimEnd = false } = {}) => {
 };
 
 let ttsAudio = null;
+const ttsCache = new Map();
+const ttsCacheOrder = [];
+const TTS_CACHE_LIMIT = 20;
+
+const cacheTtsUrl = (key, url) => {
+  if (ttsCache.has(key)) return;
+  ttsCache.set(key, url);
+  ttsCacheOrder.push(key);
+  if (ttsCacheOrder.length > TTS_CACHE_LIMIT) {
+    const oldest = ttsCacheOrder.shift();
+    const oldUrl = ttsCache.get(oldest);
+    if (oldUrl) URL.revokeObjectURL(oldUrl);
+    ttsCache.delete(oldest);
+  }
+};
+
+async function getTtsUrl(text) {
+  const key = String(text ?? "").trim().toLowerCase();
+  if (!key) return "";
+  const cached = ttsCache.get(key);
+  if (cached) return cached;
+
+  const r = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text: text }),
+  });
+
+  if (!r.ok) throw new Error(await r.text());
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  cacheTtsUrl(key, url);
+  return url;
+}
 
 // 🔊 Pronunciation (used in Review only)
 async function speakWord(text) {
@@ -110,23 +144,12 @@ async function speakWord(text) {
       ttsAudio = null;
     }
 
-    const r = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: t }),
-    });
-
-    if (!r.ok) throw new Error(await r.text());
-
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
+    const url = await getTtsUrl(t);
     ttsAudio = new Audio(url);
     ttsAudio.onended = () => {
-      URL.revokeObjectURL(url);
       ttsAudio = null;
     };
     ttsAudio.onerror = () => {
-      URL.revokeObjectURL(url);
       ttsAudio = null;
     };
     await ttsAudio.play();
@@ -416,6 +439,11 @@ export default function App() {
     () => (reviewId ? byId.get(reviewId) || null : null),
     [byId, reviewId]
   );
+
+  useEffect(() => {
+    if (!currentCard?.word) return;
+    getTtsUrl(currentCard.word).catch(() => {});
+  }, [currentCard?.word]);
 
   useEffect(() => {
     if (tab !== "review") return;
