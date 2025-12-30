@@ -95,19 +95,49 @@ const normalizeWordInput = (raw, { trimEnd = false } = {}) => {
   return withoutDots.replace(/\b[a-z]/g, (m) => m.toUpperCase());
 };
 
+let ttsAudio = null;
+
 // 🔊 Pronunciation (used in Review only)
-function speakWord(text) {
+async function speakWord(text) {
   if (typeof window === "undefined") return;
-  const t = (text ?? "").trim();
+  const t = String(text ?? "").trim();
   if (!t) return;
-  if (!("speechSynthesis" in window)) return;
 
-  const utter = new SpeechSynthesisUtterance(t);
-  utter.lang = "en-US";
-  utter.rate = 0.95;
+  try {
+    if (ttsAudio) {
+      ttsAudio.pause();
+      ttsAudio.currentTime = 0;
+      ttsAudio = null;
+    }
 
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(utter);
+    const r = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: t }),
+    });
+
+    if (!r.ok) throw new Error(await r.text());
+
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
+    ttsAudio = new Audio(url);
+    ttsAudio.onended = () => {
+      URL.revokeObjectURL(url);
+      ttsAudio = null;
+    };
+    ttsAudio.onerror = () => {
+      URL.revokeObjectURL(url);
+      ttsAudio = null;
+    };
+    await ttsAudio.play();
+  } catch {
+    if (!("speechSynthesis" in window)) return;
+    const utter = new SpeechSynthesisUtterance(t);
+    utter.lang = "en-US";
+    utter.rate = 0.95;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  }
 }
 
 // Spaced repetition (Done uses this)
@@ -741,7 +771,15 @@ export default function App() {
                           style={styles.input}
                           placeholder="One short meaning"
                           value={definition}
-                          onChange={(e) => setDefinition(e.target.value)}
+                          onChange={(e) => {
+                            const next = e.target.value;
+                            const trimmedStart = next.replace(/^\s+/, "");
+                            const normalized =
+                              trimmedStart && trimmedStart[0] === trimmedStart[0].toUpperCase()
+                                ? trimmedStart[0].toLowerCase() + trimmedStart.slice(1)
+                                : trimmedStart;
+                            setDefinition(normalized);
+                          }}
                         />
                       </div>
 
