@@ -1,17 +1,21 @@
-export async function onRequestGet({ request, env }) {
+export async function onRequest({ request, env }) {
+  // Handle CORS preflight
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders(request) });
+  }
+
+  if (request.method !== "GET") {
+    return json({ error: "Method not allowed" }, 405, request);
+  }
+
   try {
     const url = new URL(request.url);
     const wordRaw = (url.searchParams.get("word") || "").trim();
-    if (!wordRaw) return json({ error: "Missing word" }, 400);
-    if (!env?.AI) return json({ error: "Workers AI binding AI missing" }, 500);
+    if (!wordRaw) return json({ error: "Missing word" }, 400, request);
+    if (!env?.AI) return json({ error: "Workers AI binding AI missing" }, 500, request);
 
     const word = wordRaw;
     const w = word.toLowerCase();
-
-    // 1) If we know a standard aviation Russian term, FORCE it (term first)
-    // This guarantees correct Russian for common words regardless of model weirdness.
-    const forcedRu = aviationRuTerm(w);
-    const forcedSuffix = defaultExplanationSuffix(w);
 
     const systemPrompt = `
 You are an aviation vocabulary assistant.
@@ -25,9 +29,11 @@ Return ONLY valid JSON in this exact shape:
 
 Rules:
 - Aviation meaning if relevant
-- Definition: max 14 words, simple English, must be accurate
+- Definition: max 14 words, simple English
 - Examples: exactly 2, short, aviation context
-- ru: Cyrillic only, TERM FIRST, optional short explanation in parentheses
+- Russian must be Cyrillic
+- ru MUST start with the standard Russian aviation term (TERM FIRST)
+- If helpful, add a very short explanation in parentheses after the term
 - No extra text
 - No markdown
 `;
@@ -45,72 +51,68 @@ Rules:
     try {
       data = JSON.parse(raw);
     } catch {
-      // If the model returns non-JSON, still return something useful
-      return json(
-        {
-          error: "AI returned invalid JSON",
-          raw,
-          fallback: {
-            definition: "",
-            examples: [],
-            ru: forcedRu ? `${forcedRu}${forcedSuffix}` : "",
-          },
-        },
-        502
-      );
+      return json({ error: "AI returned invalid JSON", raw }, 502, request);
     }
 
-    // Normalize fields
+    // Normalize
     data.definition = String(data.definition || "").trim();
     data.examples = Array.isArray(data.examples)
       ? data.examples.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 2)
       : [];
     data.ru = String(data.ru || "").trim();
 
-    // 2) Fix classic mojibake ONLY when it looks like mojibake
+    // Fix classic mojibake ONLY when it looks like mojibake
     if (looksLikeMojibakeLatin1(data.ru)) {
       data.ru = fixLatin1Mojibake(data.ru).trim();
     }
 
-    // 3) Enforce ru validity:
-    // - If we have a forced term: always use it (TERM FIRST guaranteed)
-    // - Else: accept model ru only if it contains Cyrillic (sanity check)
+    // Enforce TERM FIRST with a glossary override for common terms
+    const forcedRu = aviationRuTerm(w);
     if (forcedRu) {
-      data.ru = `${forcedRu}${forcedSuffix}`;
+      data.ru = `${forcedRu}${defaultExplanationSuffix(w)}`;
     } else {
+      // If model ru is not Cyrillic, keep it safe
       if (!containsCyrillic(data.ru)) {
-        // Model failed - return empty ru or a simple fallback in Cyrillic
-        // You can customize this fallback text if you want.
         data.ru = "Термин (нет надежного перевода)";
-      } else {
-        // Ensure "term first": if model started with explanation, we can't fully fix without knowing the term,
-        // but at least we keep a clean Cyrillic string.
-        data.ru = data.ru;
       }
     }
 
-    return json(data, 200);
+    return json(data, 200, request);
   } catch (e) {
-    return json(
-      { error: "Unhandled exception", message: e?.message || String(e) },
-      500
-    );
+    return json({ error: "Unhandled exception", message: e?.message || String(e) }, 500, request);
   }
 }
 
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "content-type": "application/json; charset=utf-8" },
-  });
+function json(obj, status, request) {
+  const headers = corsHeaders(request);
+  headers.set("content-type", "application/json; charset=utf-8");
+  return new Response(JSON.stringify(obj), { status, headers });
 }
 
-// Detect classic UTF-8-as-Latin1 mojibake patterns: "Ð", "Ñ", etc.
+function corsHeaders(request) {
+  const origin = request.headers.get("Origin") || "";
+  const headers = new Headers();
+
+  // Allow your deployed site + local dev
+  const allowed =
+    origin === "https://pilot-vocab-cards.pages.dev" ||
+    /^http:\/\/localhost:\d+$/.test(origin) ||
+    /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
+
+  if (allowed) {
+    headers.set("Access-Control-Allow-Origin", origin);
+  }
+
+  headers.set("Access-Control-Allow-Methods", "GET,OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  headers.set("Access-Control-Max-Age", "86400");
+  return headers;
+}
+
 function looksLikeMojibakeLatin1(s) {
   return /[ÐÑÃâ€“â€”]/.test(String(s || ""));
 }
 
-// Fix strings that are UTF-8 bytes interpreted as Latin-1
 function fixLatin1Mojibake(str) {
   try {
     const bytes = new Uint8Array([...str].map((c) => c.charCodeAt(0) & 0xff));
@@ -124,7 +126,6 @@ function containsCyrillic(s) {
   return /[А-Яа-яЁё]/.test(String(s || ""));
 }
 
-// TERM FIRST glossary (expand anytime)
 function aviationRuTerm(w) {
   const map = {
     aileron: "Элерон",
@@ -140,7 +141,6 @@ function aviationRuTerm(w) {
     throttle: "Рычаг газа",
     mixture: "Рычаг смеси",
     propeller: "Воздушный винт",
-    manifold: "Впускной коллектор",
   };
   return map[w] || "";
 }

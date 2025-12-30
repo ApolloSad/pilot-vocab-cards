@@ -6,6 +6,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
  * - Migrates from old localStorage key "pilotVocabCards_v8" automatically
  * - Keep button loops (rotates current word to end of active review list)
  * - Bottom bar removed (clean/minimal)
+ * - AI Fill button (Cloudflare Pages Functions -> /api/define?word=...)
  */
 
 const LEGACY_LS_KEY = "pilotVocabCards_v8"; // your old app saved here
@@ -217,6 +218,10 @@ export default function App() {
   const [examplesText, setExamplesText] = useState("");
   const [ru, setRu] = useState("");
 
+  // AI Fill UI state
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError] = useState("");
+
   const [showAnswer, setShowAnswer] = useState(false);
   const [reviewId, setReviewId] = useState(null);
   const [search, setSearch] = useState("");
@@ -323,6 +328,41 @@ export default function App() {
     setShowAnswer(false);
   }, [tab, reviewIds, reviewId]);
 
+  // AI Fill: calls your Cloudflare Pages Function at /api/define
+  const aiFill = useCallback(async () => {
+  const w = word.trim();
+  if (!w) return;
+
+  setAiLoading(true);
+  setAiError("");
+
+  try {
+    const base =
+      import.meta.env.DEV ? "https://pilot-vocab-cards.pages.dev" : window.location.origin;
+
+    const res = await fetch(`${base}/api/define?word=${encodeURIComponent(w)}`);
+
+    // safer parse (shows real error if not JSON)
+    const text = await res.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
+    }
+
+    if (!res.ok) throw new Error(data?.error || "AI error");
+
+    setDefinition(String(data?.definition || "").trim());
+    setExamplesText(Array.isArray(data?.examples) ? data.examples.slice(0, 3).join("\n") : "");
+    setRu(String(data?.ru || "").trim());
+  } catch (e) {
+    setAiError(e?.message || "AI fill failed");
+  } finally {
+    setAiLoading(false);
+  }
+}, [word]);
+
   const saveCard = useCallback(() => {
     const w = word.trim();
     const d = definition.trim();
@@ -348,6 +388,7 @@ export default function App() {
     setDefinition("");
     setExamplesText("");
     setRu("");
+    setAiError("");
     setTab("deck");
   }, [word, definition, examplesText, ru]);
 
@@ -521,7 +562,7 @@ export default function App() {
                       <div style={styles.label}>Word</div>
                       <input
                         style={styles.input}
-                        placeholder="e.g., cantilever"
+                        placeholder="e.g., aileron"
                         value={word}
                         onChange={(e) => setWord(e.target.value)}
                       />
@@ -541,7 +582,7 @@ export default function App() {
                       <div style={styles.label}>Examples (one per line)</div>
                       <textarea
                         style={styles.textarea}
-                        placeholder={"Example 1\nExample 2\nExample 3"}
+                        placeholder={"Example 1\nExample 2"}
                         value={examplesText}
                         onChange={(e) => setExamplesText(e.target.value)}
                       />
@@ -551,7 +592,7 @@ export default function App() {
                       <div style={styles.label}>Russian translation</div>
                       <input
                         style={styles.input}
-                        placeholder="e.g., консольный (крыло без подкосов)"
+                        placeholder="e.g., Элерон (управление креном)"
                         value={ru}
                         onChange={(e) => setRu(e.target.value)}
                       />
@@ -562,6 +603,17 @@ export default function App() {
                     <button style={styles.primaryBtn} onClick={saveCard} type="button">
                       Add card
                     </button>
+
+                    <button
+                      style={styles.secondaryBtn}
+                      onClick={aiFill}
+                      type="button"
+                      disabled={aiLoading}
+                      title="Auto-fill definition, examples and Russian using AI"
+                    >
+                      {aiLoading ? "AI..." : "AI Fill"}
+                    </button>
+
                     <button
                       style={styles.secondaryBtn}
                       type="button"
@@ -570,11 +622,18 @@ export default function App() {
                         setDefinition("");
                         setExamplesText("");
                         setRu("");
+                        setAiError("");
                       }}
                     >
                       Clear
                     </button>
                   </div>
+
+                  {!!aiError && (
+                    <div style={{ color: "crimson", fontWeight: 800 }}>
+                      {aiError}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -984,4 +1043,3 @@ const styles = {
   li: { marginBottom: 6, lineHeight: 1.35 },
   ru: { marginTop: 8, fontStyle: "italic", fontWeight: 750, color: TEXT },
 };
-
