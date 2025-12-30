@@ -13,13 +13,17 @@ Return ONLY valid JSON in this exact shape:
 {
   "definition": "one short definition (max 14 words)",
   "examples": ["short example", "short example"],
-  "ru": "short Russian translation"
+  "ru": "Russian term first, then optional short explanation"
 }
 
 Rules:
 - Aviation meaning if relevant
-- Simple English
-- Russian must be Cyrillic (not transliteration)
+- Definition: max 14 words, simple English
+- Examples: 2 short examples, aviation context if possible
+- Russian must be Cyrillic
+- ru field MUST start with the standard Russian aviation term (TERM FIRST)
+- If helpful, add a very short explanation in parentheses after the term
+- If no standard term exists, translate the word, term first
 - No extra text
 - No markdown
 `;
@@ -31,7 +35,7 @@ Rules:
       { role: "system", content: systemPrompt.trim() },
       { role: "user", content: userPrompt },
     ],
-    max_output_tokens: 220,
+    max_output_tokens: 240,
   });
 
   let data;
@@ -44,6 +48,11 @@ Rules:
   // Fix mojibake Cyrillic like "Ð¥Ð²Ð¾Ñ..."
   if (typeof data?.ru === "string") {
     data.ru = fixMojibake(data.ru);
+  }
+
+  // Enforce "term first" gently if the model adds leading whitespace/quotes
+  if (typeof data?.ru === "string") {
+    data.ru = data.ru.trim();
   }
 
   return json(data, 200);
@@ -61,8 +70,6 @@ function fixMojibake(str) {
   try {
     const bytes = new Uint8Array([...str].map((c) => c.charCodeAt(0)));
     const decoded = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
-
-    // If it didn't change, just return original
     return decoded && decoded !== str ? decoded : str;
   } catch {
     return str;
