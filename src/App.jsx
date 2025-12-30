@@ -1,19 +1,26 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 
 /**
- * Pilot Vocab Cards - Safari persistent storage FIX (minimal UI)
+ * Pilot Vocab Cards (minimal UI)
  * - Uses IndexedDB (reliable in Safari) instead of localStorage
  * - Migrates from old localStorage key "pilotVocabCards_v8" automatically
  * - Keep button loops (rotates current word to end of active review list)
  * - Bottom bar removed (clean/minimal)
  * - AI Fill button (Cloudflare Pages Functions -> /api/define?word=...)
+ *
+ * Updates in this version:
+ * - Russian translation removed everywhere (data model + UI)
+ * - Add UI cleaned and rescaled
+ * - AI Fill cached per word (repeat clicks keep the same best output)
+ * - AI is instructed to give aviation meaning if relevant, otherwise general meaning
  */
 
-const LEGACY_LS_KEY = "pilotVocabCards_v8"; // your old app saved here
+const LEGACY_LS_KEY = "pilotVocabCards_v8"; // old app saved here
 const DB_NAME = "pilot-vocab-cards-db";
 const DB_STORE = "kv";
 const DB_CARDS_KEY = "cards_v1";
 const DB_QUEUE_KEY = "queue_v1";
+const DB_AI_CACHE_KEY = "ai_cache_v1";
 
 // ---------- IndexedDB tiny helper ----------
 function idbOpen() {
@@ -127,6 +134,7 @@ function schedule(card, grade) {
 }
 
 // Normalize/migrate cards from storage (accepts old v8 ISO srs.due too)
+// Russian removed: ignores legacy "ru"
 function normalizeCards(input) {
   if (!Array.isArray(input)) return [];
   const todayMs = startOfLocalDayMs();
@@ -138,7 +146,6 @@ function normalizeCards(input) {
     const examples = Array.isArray(c?.examples)
       ? c.examples.map((x) => String(x ?? "").trim()).filter(Boolean)
       : [];
-    const ru = String(c?.ru ?? "");
 
     const dueMsRaw = c?.srs?.dueMs;
     const dueIsoRaw = c?.srs?.due; // legacy
@@ -156,7 +163,6 @@ function normalizeCards(input) {
       word,
       definition,
       examples,
-      ru,
       srs: {
         dueMs,
         intervalDays: Number.isFinite(intervalDays) ? intervalDays : 0,
@@ -165,6 +171,44 @@ function normalizeCards(input) {
       },
     };
   });
+}
+
+function normalizeAiPayload(data, fallbackWord) {
+  const def = String(data?.definition || "").trim();
+  const ex = Array.isArray(data?.examples) ? data.examples : [];
+
+  const examples = ex
+    .map((x) => String(x || "").trim())
+    .filter(Boolean)
+    .slice(0, 2);
+
+  // Safety: keep output simple and short
+  const cleanDefinition = clampWords(def, 14);
+  const cleanExamples = ensureTwoExamples(
+    examples.map((t) => clampWords(t, 12)),
+    fallbackWord
+  );
+
+  return { definition: cleanDefinition, examples: cleanExamples };
+}
+
+function clampWords(text, maxWords) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  const parts = t.split(" ");
+  if (parts.length <= maxWords) return t;
+  return parts.slice(0, maxWords).join(" ").trim();
+}
+
+function ensureTwoExamples(examples, word) {
+  const w = String(word || "").trim();
+  const base = [
+    w ? `I reviewed the word "${w}".` : "I reviewed a new word today.",
+    w ? `I used "${w}" in a short sentence.` : "I used it in a short sentence.",
+  ];
+  const out = Array.isArray(examples) ? examples.filter(Boolean) : [];
+  while (out.length < 2) out.push(base[out.length] || base[0]);
+  return out.slice(0, 2);
 }
 
 // ---------- UI ----------
@@ -198,13 +242,6 @@ function CardView({ card }) {
           </ul>
         </div>
       )}
-
-      {!!card.ru && (
-        <div style={styles.block}>
-          <div style={styles.blockTitle}>Russian</div>
-          <div style={styles.ru}>{card.ru}</div>
-        </div>
-      )}
     </div>
   );
 }
@@ -216,11 +253,14 @@ export default function App() {
   const [word, setWord] = useState("");
   const [definition, setDefinition] = useState("");
   const [examplesText, setExamplesText] = useState("");
-  const [ru, setRu] = useState("");
 
   // AI Fill UI state
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState("");
+
+  // AI cache - keep same "best" output if AI Fill clicked repeatedly for same word
+  // Shape: { [lowerWord]: { definition: string, examples: string[] } }
+  const [aiCache, setAiCache] = useState({});
 
   const [showAnswer, setShowAnswer] = useState(false);
   const [reviewId, setReviewId] = useState(null);
@@ -237,9 +277,11 @@ export default function App() {
       try {
         const rawCards = await idbGet(DB_CARDS_KEY);
         const rawQueue = await idbGet(DB_QUEUE_KEY);
+        const rawAiCache = await idbGet(DB_AI_CACHE_KEY);
 
         const loadedCards = normalizeCards(safeJsonParse(rawCards, []));
         const loadedQueue = safeJsonParse(rawQueue, []);
+        const loadedAiCache = safeJsonParse(rawAiCache, {});
 
         // If DB empty -> try legacy localStorage import once
         if (loadedCards.length === 0) {
@@ -250,8 +292,10 @@ export default function App() {
           if (legacyNormalized.length > 0) {
             setCards(legacyNormalized);
             setStudyQueueIds([]); // old app didn't persist queue
+            setAiCache(typeof loadedAiCache === "object" && loadedAiCache ? loadedAiCache : {});
             await idbSet(DB_CARDS_KEY, JSON.stringify(legacyNormalized));
             await idbSet(DB_QUEUE_KEY, JSON.stringify([]));
+            await idbSet(DB_AI_CACHE_KEY, JSON.stringify(loadedAiCache || {}));
             setHydrated(true);
             return;
           }
@@ -259,6 +303,7 @@ export default function App() {
 
         setCards(loadedCards);
         setStudyQueueIds(Array.isArray(loadedQueue) ? loadedQueue.map(String) : []);
+        setAiCache(typeof loadedAiCache === "object" && loadedAiCache ? loadedAiCache : {});
         setHydrated(true);
       } catch {
         // If IndexedDB fails (rare), fallback to localStorage (best effort)
@@ -266,6 +311,7 @@ export default function App() {
         const legacyParsed = safeJsonParse(legacyRaw, []);
         setCards(normalizeCards(legacyParsed));
         setStudyQueueIds([]);
+        setAiCache({});
         setHydrated(true);
       }
     })();
@@ -299,6 +345,20 @@ export default function App() {
     })();
   }, [studyQueueIds, hydrated]);
 
+  // SAVE: AI cache to IndexedDB
+  useEffect(() => {
+    if (!hydrated) return;
+    if (typeof window === "undefined") return;
+
+    (async () => {
+      try {
+        await idbSet(DB_AI_CACHE_KEY, JSON.stringify(aiCache));
+      } catch {
+        // ignore
+      }
+    })();
+  }, [aiCache, hydrated]);
+
   const byId = useMemo(() => new Map(cards.map((c) => [c.id, c])), [cards]);
 
   const dueCards = useMemo(() => {
@@ -328,40 +388,76 @@ export default function App() {
     setShowAnswer(false);
   }, [tab, reviewIds, reviewId]);
 
-  // AI Fill: calls your Cloudflare Pages Function at /api/define
+  // AI Fill: cached per word so repeated clicks keep the same best output
   const aiFill = useCallback(async () => {
-  const w = word.trim();
-  if (!w) return;
+    const w = word.trim();
+    if (!w) return;
 
-  setAiLoading(true);
-  setAiError("");
-
-  try {
-    const base =
-      import.meta.env.DEV ? "https://pilot-vocab-cards.pages.dev" : window.location.origin;
-
-    const res = await fetch(`${base}/api/define?word=${encodeURIComponent(w)}`);
-
-    // safer parse (shows real error if not JSON)
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      throw new Error(`Non-JSON response: ${text.slice(0, 120)}`);
+    const key = w.toLowerCase();
+    const cached = aiCache?.[key];
+    if (cached?.definition && Array.isArray(cached?.examples) && cached.examples.length > 0) {
+      setDefinition(String(cached.definition).trim());
+      setExamplesText(cached.examples.slice(0, 2).join("\n"));
+      setAiError("");
+      return;
     }
 
-    if (!res.ok) throw new Error(data?.error || "AI error");
+    setAiLoading(true);
+    setAiError("");
 
-    setDefinition(String(data?.definition || "").trim());
-    setExamplesText(Array.isArray(data?.examples) ? data.examples.slice(0, 3).join("\n") : "");
-    setRu(String(data?.ru || "").trim());
-  } catch (e) {
-    setAiError(e?.message || "AI fill failed");
-  } finally {
-    setAiLoading(false);
-  }
-}, [word]);
+    try {
+      const tryUrls = [
+        `/api/define?word=${encodeURIComponent(w)}`,
+        // fallback for local Vite dev if you do not proxy Pages Functions
+        ...(import.meta.env.DEV ? [`https://pilot-vocab-cards.pages.dev/api/define?word=${encodeURIComponent(w)}`] : []),
+      ];
+
+      let res = null;
+      let lastErr = "";
+
+      for (const url of tryUrls) {
+        try {
+          const r = await fetch(url, { method: "GET" });
+          const text = await r.text();
+
+          let data;
+          try {
+            data = JSON.parse(text);
+          } catch {
+            throw new Error(`Non-JSON response: ${text.slice(0, 160)}`);
+          }
+
+          if (!r.ok) throw new Error(data?.error || "AI error");
+
+          const normalized = normalizeAiPayload(data, w);
+
+          if (!normalized.definition) throw new Error("Empty definition");
+
+          // Apply and persist cache
+          setDefinition(normalized.definition);
+          setExamplesText(normalized.examples.join("\n"));
+
+          setAiCache((prev) => ({
+            ...(prev || {}),
+            [key]: { definition: normalized.definition, examples: normalized.examples },
+          }));
+
+          res = r;
+          lastErr = "";
+          break;
+        } catch (e) {
+          lastErr = e?.message || "AI fill failed";
+          // try next url
+        }
+      }
+
+      if (!res) throw new Error(lastErr || "AI fill failed");
+    } catch (e) {
+      setAiError(e?.message || "AI fill failed");
+    } finally {
+      setAiLoading(false);
+    }
+  }, [word, aiCache]);
 
   const saveCard = useCallback(() => {
     const w = word.trim();
@@ -371,14 +467,14 @@ export default function App() {
     const examples = examplesText
       .split("\n")
       .map((x) => x.trim())
-      .filter(Boolean);
+      .filter(Boolean)
+      .slice(0, 2);
 
     const newCard = {
       id: uid(),
       word: w,
-      definition: d,
-      examples,
-      ru: ru.trim(),
+      definition: clampWords(d, 14),
+      examples: ensureTwoExamples(examples.map((t) => clampWords(t, 12)), w),
       srs: { dueMs: startOfLocalDayMs(), intervalDays: 0, ease: 2.5, reps: 0 },
     };
 
@@ -387,10 +483,9 @@ export default function App() {
     setWord("");
     setDefinition("");
     setExamplesText("");
-    setRu("");
     setAiError("");
     setTab("deck");
-  }, [word, definition, examplesText, ru]);
+  }, [word, definition, examplesText]);
 
   // REVIEW: Keep = rotate to end in study mode; otherwise move pointer to next due
   const keepInReview = useCallback(() => {
@@ -413,7 +508,7 @@ export default function App() {
     const idx = reviewIds.indexOf(reviewId);
     if (idx === -1 || reviewIds.length === 0) return;
     setReviewId(reviewIds[(idx + 1) % reviewIds.length]);
-  }, [reviewId, studyQueueIds.length, reviewIds]);
+  }, [reviewId, studyQueueIds, reviewIds]);
 
   const doneInReview = useCallback(() => {
     if (!reviewId) return;
@@ -488,7 +583,7 @@ export default function App() {
           </div>
 
           <div style={styles.frameBody}>
-            <div style={styles.content}>
+            <div style={tab === "add" ? styles.contentAdd : styles.content}>
               {/* REVIEW */}
               {tab === "review" && (
                 <div style={styles.section}>
@@ -557,83 +652,81 @@ export default function App() {
               {/* ADD */}
               {tab === "add" && (
                 <div style={styles.section}>
-                  <div style={styles.formGrid}>
-                    <div style={styles.field}>
-                      <div style={styles.label}>Word</div>
-                      <input
-                        style={styles.input}
-                        placeholder="e.g., aileron"
-                        value={word}
-                        onChange={(e) => setWord(e.target.value)}
-                      />
+                  <div style={styles.formCard}>
+                    <div style={styles.formGrid}>
+                      <div style={styles.field}>
+                        <div style={styles.label}>Word</div>
+                        <input
+                          style={styles.inputLarge}
+                          placeholder="e.g., aileron"
+                          value={word}
+                          onChange={(e) => {
+                            setWord(e.target.value);
+                            if (aiError) setAiError("");
+                          }}
+                        />
+                      </div>
+
+                      <div style={styles.field}>
+                        <div style={styles.label}>Definition</div>
+                        <input
+                          style={styles.inputLarge}
+                          placeholder="One short meaning"
+                          value={definition}
+                          onChange={(e) => setDefinition(e.target.value)}
+                        />
+                      </div>
+
+                      <div style={{ ...styles.field, gridColumn: "1 / -1" }}>
+                        <div style={styles.label}>Examples</div>
+                        <textarea
+                          style={styles.textareaLarge}
+                          placeholder={"Example 1\nExample 2"}
+                          value={examplesText}
+                          onChange={(e) => setExamplesText(e.target.value)}
+                        />
+                      </div>
                     </div>
 
-                    <div style={styles.field}>
-                      <div style={styles.label}>Short description</div>
-                      <input
-                        style={styles.input}
-                        placeholder="One clear meaning"
-                        value={definition}
-                        onChange={(e) => setDefinition(e.target.value)}
-                      />
+                    <div style={styles.actions}>
+                      <button style={styles.primaryBtn} onClick={saveCard} type="button">
+                        Add card
+                      </button>
+
+                      <button
+                        style={styles.secondaryBtn}
+                        onClick={aiFill}
+                        type="button"
+                        disabled={aiLoading || !word.trim()}
+                        title="Auto-fill definition and examples using AI"
+                      >
+                        {aiLoading ? "AI..." : "AI Fill"}
+                      </button>
+
+                      <button
+                        style={styles.secondaryBtn}
+                        type="button"
+                        onClick={() => {
+                          setWord("");
+                          setDefinition("");
+                          setExamplesText("");
+                          setAiError("");
+                        }}
+                      >
+                        Clear
+                      </button>
                     </div>
 
-                    <div style={{ ...styles.field, gridColumn: "1 / -1" }}>
-                      <div style={styles.label}>Examples (one per line)</div>
-                      <textarea
-                        style={styles.textarea}
-                        placeholder={"Example 1\nExample 2"}
-                        value={examplesText}
-                        onChange={(e) => setExamplesText(e.target.value)}
-                      />
-                    </div>
+                    {!!aiError && (
+                      <div style={styles.errorBox}>
+                        {aiError}
+                      </div>
+                    )}
 
-                    <div style={{ ...styles.field, gridColumn: "1 / -1" }}>
-                      <div style={styles.label}>Russian translation</div>
-                      <input
-                        style={styles.input}
-                        placeholder="e.g., Элерон (управление креном)"
-                        value={ru}
-                        onChange={(e) => setRu(e.target.value)}
-                      />
+                    <div style={styles.hint}>
+                      Tip: AI Fill is cached. Clicking again keeps the same best result.
                     </div>
                   </div>
-
-                  <div style={styles.actions}>
-                    <button style={styles.primaryBtn} onClick={saveCard} type="button">
-                      Add card
-                    </button>
-
-                    <button
-                      style={styles.secondaryBtn}
-                      onClick={aiFill}
-                      type="button"
-                      disabled={aiLoading}
-                      title="Auto-fill definition, examples and Russian using AI"
-                    >
-                      {aiLoading ? "AI..." : "AI Fill"}
-                    </button>
-
-                    <button
-                      style={styles.secondaryBtn}
-                      type="button"
-                      onClick={() => {
-                        setWord("");
-                        setDefinition("");
-                        setExamplesText("");
-                        setRu("");
-                        setAiError("");
-                      }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-
-                  {!!aiError && (
-                    <div style={{ color: "crimson", fontWeight: 800 }}>
-                      {aiError}
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -643,7 +736,7 @@ export default function App() {
                   <div style={styles.searchRow}>
                     <input
                       style={styles.input}
-                      placeholder="Search word or description..."
+                      placeholder="Search word or definition..."
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
                     />
@@ -851,6 +944,16 @@ const styles = {
     gap: 14,
   },
 
+  // Slightly narrower for Add so it looks tighter and "perfect"
+  contentAdd: {
+    maxWidth: 860,
+    margin: "0 auto",
+    minHeight: "100%",
+    display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+
   section: { display: "flex", flexDirection: "column", gap: 14 },
 
   empty: {
@@ -923,6 +1026,13 @@ const styles = {
     fontWeight: 950,
   },
 
+  formCard: {
+    borderRadius: 18,
+    border: `1px solid ${BORDER}`,
+    background: "linear-gradient(180deg, rgba(0,255,102,0.06), rgba(0,0,0,0.00))",
+    padding: 14,
+  },
+
   formGrid: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
@@ -948,22 +1058,54 @@ const styles = {
     outline: "none",
     fontWeight: 750,
   },
-  textarea: {
+
+  inputLarge: {
     width: "100%",
     boxSizing: "border-box",
-    padding: "12px 12px",
+    padding: "14px 12px",
     borderRadius: 14,
     border: `1px solid ${BORDER}`,
     background: SURFACE,
     color: TEXT,
     outline: "none",
-    minHeight: 130,
+    fontWeight: 800,
+    fontSize: 15,
+  },
+
+  textareaLarge: {
+    width: "100%",
+    boxSizing: "border-box",
+    padding: "14px 12px",
+    borderRadius: 14,
+    border: `1px solid ${BORDER}`,
+    background: SURFACE,
+    color: TEXT,
+    outline: "none",
+    minHeight: 150,
     resize: "vertical",
     fontWeight: 750,
     lineHeight: 1.4,
+    fontSize: 14,
   },
 
-  actions: { display: "flex", gap: 10, flexWrap: "wrap" },
+  actions: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 12 },
+
+  errorBox: {
+    marginTop: 12,
+    padding: 12,
+    borderRadius: 14,
+    border: "1px solid rgba(220, 20, 60, 0.35)",
+    background: "rgba(220, 20, 60, 0.08)",
+    color: "crimson",
+    fontWeight: 900,
+  },
+
+  hint: {
+    marginTop: 10,
+    color: MUTED,
+    fontWeight: 800,
+    fontSize: 12,
+  },
 
   searchRow: { display: "flex" },
   deckList: { display: "flex", flexDirection: "column", gap: 10 },
@@ -1041,5 +1183,4 @@ const styles = {
   },
   ul: { marginTop: 8, paddingLeft: 18, color: TEXT },
   li: { marginBottom: 6, lineHeight: 1.35 },
-  ru: { marginTop: 8, fontStyle: "italic", fontWeight: 750, color: TEXT },
 };

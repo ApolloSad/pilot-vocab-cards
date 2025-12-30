@@ -1,93 +1,60 @@
-export async function onRequest({ request, env }) {
-  // Only GET is allowed
-  if (request.method !== "GET") {
-    return json({ error: "Method not allowed" }, 405);
-  }
-
+export async function onRequestGet({ request, env }) {
   try {
     const url = new URL(request.url);
     const wordRaw = (url.searchParams.get("word") || "").trim();
     if (!wordRaw) return json({ error: "Missing word" }, 400);
+
+    const word = wordRaw.slice(0, 64);
     if (!env?.AI) return json({ error: "Workers AI binding missing" }, 500);
 
-    const word = wordRaw;
-    const w = word.toLowerCase();
-
-    // Force correct Russian term when we know it
-    const forcedRu = aviationRuTerm(w);
-    const forcedSuffix = defaultExplanationSuffix(w);
-
     const systemPrompt = `
-You are an aviation vocabulary assistant.
+You are a vocabulary assistant.
 
 Return ONLY valid JSON in this exact shape:
 {
   "definition": "one short definition (max 14 words)",
-  "examples": ["short example", "short example"],
-  "ru": "TERM FIRST in Russian, optional explanation in parentheses"
+  "examples": ["short example (max 12 words)", "short example (max 12 words)"]
 }
 
 Rules:
-- Aviation meaning if relevant
-- Simple English
-- Definition max 14 words
-- Exactly 2 short examples
-- Russian must be Cyrillic
-- ru MUST start with the standard Russian aviation term
-- Optional explanation in parentheses
-- No extra text
-- No markdown
-`;
+- If the word is aviation related, use the aviation meaning.
+- If not aviation related, give the best general meaning.
+- Simple English only.
+- Exactly 2 examples.
+- No extra keys.
+- No extra text.
+- No markdown.
+`.trim();
 
-    const result = await env.AI.run(
-      "@cf/meta/llama-3.1-8b-instruct-fast",
-      {
-        messages: [
-          { role: "system", content: systemPrompt.trim() },
-          { role: "user", content: `Word: "${word}"` },
-        ],
-        max_output_tokens: 220,
-      }
-    );
+    const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `Word: "${word}"` },
+      ],
+      max_output_tokens: 220,
+    });
+
+    const raw =
+      (typeof result === "string"
+        ? result
+        : result?.response ?? result?.text ?? result?.output ?? ""
+      ).trim();
 
     let data;
-    const raw = (result?.response || "").trim();
     try {
       data = JSON.parse(raw);
     } catch {
-      // If model breaks, still return a safe response
-      return json(
-        {
-          definition: "",
-          examples: [],
-          ru: forcedRu ? `${forcedRu}${forcedSuffix}` : "",
-        },
-        200
-      );
+      return json({ error: "Model returned non-JSON" }, 502);
     }
 
-    // Normalize fields
-    data.definition = String(data.definition || "").trim();
-    data.examples = Array.isArray(data.examples)
-      ? data.examples.map((x) => String(x).trim()).slice(0, 2)
-      : [];
-    data.ru = String(data.ru || "").trim();
+    const payload = normalizePayload(data, word);
 
-    // If model returned mojibake like "Ð¥Ð²..."
-    if (looksLikeMojibake(data.ru)) {
-      data.ru = fixMojibake(data.ru).trim();
+    if (!payload.definition) {
+      return json({ error: "Empty definition from model" }, 502);
     }
 
-    // Final authority: glossary wins
-    if (forcedRu) {
-      data.ru = `${forcedRu}${forcedSuffix}`;
-    } else if (!containsCyrillic(data.ru)) {
-      // Never return garbage
-      data.ru = "";
-    }
-
-    return json(data, 200);
-  } catch (e) {
+    return json(payload, 200);
+  } catch {
     return json({ error: "Unhandled exception" }, 500);
   }
 }
@@ -95,57 +62,42 @@ Rules:
 function json(obj, status = 200) {
   return new Response(JSON.stringify(obj), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+    },
   });
 }
 
-/* ---------- helpers ---------- */
+function normalizePayload(data, word) {
+  const def = clampWords(String(data?.definition || "").trim(), 14);
 
-function looksLikeMojibake(s) {
-  return /[ÐÑÃ]/.test(s);
+  const ex = Array.isArray(data?.examples) ? data.examples : [];
+  let examples = ex
+    .map((x) => clampWords(String(x || "").replace(/\s+/g, " ").trim(), 12))
+    .filter(Boolean)
+    .slice(0, 2);
+
+  examples = ensureTwoExamples(examples, word);
+
+  return { definition: def, examples };
 }
 
-function fixMojibake(str) {
-  try {
-    const bytes = new Uint8Array([...str].map((c) => c.charCodeAt(0)));
-    return new TextDecoder("utf-8").decode(bytes);
-  } catch {
-    return str;
-  }
+function clampWords(text, maxWords) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  const parts = t.split(" ");
+  if (parts.length <= maxWords) return t;
+  return parts.slice(0, maxWords).join(" ").trim();
 }
 
-function containsCyrillic(s) {
-  return /[А-Яа-яЁё]/.test(s);
-}
-
-/* ---------- aviation glossary (TERM FIRST) ---------- */
-
-function aviationRuTerm(w) {
-  const map = {
-    aileron: "Элерон",
-    elevator: "Руль высоты",
-    rudder: "Руль направления",
-    flap: "Закрылок",
-    flaps: "Закрылки",
-    slat: "Предкрылок",
-    slats: "Предкрылки",
-    spoiler: "Спойлер",
-    spoilers: "Спойлеры",
-    yoke: "Штурвал",
-    throttle: "Рычаг газа",
-    mixture: "Рычаг смеси",
-    propeller: "Воздушный винт",
-    manifold: "Впускной коллектор",
-  };
-  return map[w] || "";
-}
-
-function defaultExplanationSuffix(w) {
-  if (w === "aileron") return " (управление креном)";
-  if (w === "elevator") return " (управление тангажом)";
-  if (w === "rudder") return " (управление рысканьем)";
-  if (w === "flap" || w === "flaps") return " (увеличивает подъемную силу)";
-  if (w === "slat" || w === "slats") return " (улучшает обтекание на больших углах атаки)";
-  if (w === "spoiler" || w === "spoilers") return " (уменьшает подъемную силу)";
-  return "";
+function ensureTwoExamples(examples, word) {
+  const w = String(word || "").trim();
+  const base = [
+    w ? `I reviewed the word "${w}".` : "I reviewed a new word today.",
+    w ? `I used "${w}" in a short sentence.` : "I used it in a short sentence.",
+  ];
+  const out = Array.isArray(examples) ? examples.filter(Boolean) : [];
+  while (out.length < 2) out.push(base[out.length] || base[0]);
+  return out.slice(0, 2);
 }
