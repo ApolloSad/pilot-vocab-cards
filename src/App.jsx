@@ -643,9 +643,9 @@ export default function App() {
               {tab === "add" && (
                 <div style={styles.section}>
                   <div style={styles.addWrap}>
-                    <div style={styles.card}>
+                    <div style={styles.addPanel}>
                       <div style={styles.addTopRow}>
-                        <div style={{ ...styles.field, flex: "1 1 auto", minWidth: 220 }}>
+                        <div style={{ ...styles.field, minWidth: 220 }}>
                           <div style={styles.label}>Word</div>
                           <input
                             style={styles.input}
@@ -658,15 +658,6 @@ export default function App() {
                           />
                         </div>
 
-                        <button
-                          style={styles.secondaryBtn}
-                          onClick={aiFill}
-                          type="button"
-                          disabled={aiLoading || !word.trim()}
-                          title="Auto-fill definition and examples using AI"
-                        >
-                          {aiLoading ? "AI..." : "AI Fill"}
-                        </button>
                       </div>
 
                       <div style={styles.field}>
@@ -691,7 +682,7 @@ export default function App() {
 
                       <div style={styles.addActionsRow}>
                         <button
-                          style={styles.primaryBtn}
+                          style={{ ...styles.primaryBtn, minWidth: 120 }}
                           onClick={saveCard}
                           type="button"
                           disabled={!word.trim() || !definition.trim()}
@@ -701,7 +692,17 @@ export default function App() {
                         </button>
 
                         <button
-                          style={styles.secondaryBtn}
+                          style={{ ...styles.secondaryBtn, minWidth: 120 }}
+                          onClick={aiFill}
+                          type="button"
+                          disabled={aiLoading || !word.trim()}
+                          title="Auto-fill definition and examples using AI"
+                        >
+                          {aiLoading ? "AI..." : "AI Fill"}
+                        </button>
+
+                        <button
+                          style={{ ...styles.secondaryBtn, minWidth: 120 }}
                           type="button"
                           onClick={() => {
                             setWord("");
@@ -1013,18 +1014,26 @@ const styles = {
     justifyContent: "center",
     width: "100%",
   },
-  addTopRow: {
+  addPanel: {
+    width: "100%",
+    maxWidth: 960,
     display: "flex",
+    flexDirection: "column",
+    gap: 14,
+  },
+  addTopRow: {
+    display: "grid",
+    gridTemplateColumns: "minmax(220px, 1fr) auto",
     gap: 12,
-    alignItems: "flex-end",
-    flexWrap: "wrap",
+    alignItems: "end",
   },
   addActionsRow: {
     display: "flex",
-    gap: 10,
+    gap: 12,
     flexWrap: "wrap",
+    alignItems: "center",
     justifyContent: "flex-start",
-    marginTop: 2,
+    marginTop: 4,
   },
 
   field: { display: "flex", flexDirection: "column", gap: 8 },
