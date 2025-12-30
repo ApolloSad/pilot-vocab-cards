@@ -3,10 +3,7 @@ export async function onRequestGet({ request, env }) {
   const word = (url.searchParams.get("word") || "").trim();
 
   if (!word) {
-    return new Response(
-      JSON.stringify({ error: "Missing word" }),
-      { status: 400, headers: { "content-type": "application/json" } }
-    );
+    return json({ error: "Missing word" }, 400);
   }
 
   const systemPrompt = `
@@ -28,28 +25,30 @@ Rules:
 
   const userPrompt = `Word: "${word}"`;
 
-  const result = await env.AI.run(
-    "@cf/meta/llama-3.1-8b-instruct-fast",
-    {
-      messages: [
-        { role: "system", content: systemPrompt.trim() },
-        { role: "user", content: userPrompt }
-      ],
-      max_output_tokens: 200
-    }
-  );
+  const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
+    messages: [
+      { role: "system", content: systemPrompt.trim() },
+      { role: "user", content: userPrompt },
+    ],
+    max_output_tokens: 200,
+  });
 
   let data;
   try {
     data = JSON.parse(result.response);
   } catch {
-    return new Response(
-      JSON.stringify({ error: "AI returned invalid JSON", raw: result.response }),
-      { status: 500, headers: { "content-type": "application/json" } }
+    return json(
+      { error: "AI returned invalid JSON", raw: result.response },
+      500
     );
   }
 
-  return new Response(JSON.stringify(data), {
-    headers: { "content-type": "application/json" }
+  return json(data, 200);
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
