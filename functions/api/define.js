@@ -1,21 +1,21 @@
 export async function onRequest({ request, env }) {
-  // Handle CORS preflight
-  if (request.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: corsHeaders(request) });
-  }
-
+  // Only GET is allowed
   if (request.method !== "GET") {
-    return json({ error: "Method not allowed" }, 405, request);
+    return json({ error: "Method not allowed" }, 405);
   }
 
   try {
     const url = new URL(request.url);
     const wordRaw = (url.searchParams.get("word") || "").trim();
-    if (!wordRaw) return json({ error: "Missing word" }, 400, request);
-    if (!env?.AI) return json({ error: "Workers AI binding AI missing" }, 500, request);
+    if (!wordRaw) return json({ error: "Missing word" }, 400);
+    if (!env?.AI) return json({ error: "Workers AI binding missing" }, 500);
 
     const word = wordRaw;
     const w = word.toLowerCase();
+
+    // Force correct Russian term when we know it
+    const forcedRu = aviationRuTerm(w);
+    const forcedSuffix = defaultExplanationSuffix(w);
 
     const systemPrompt = `
 You are an aviation vocabulary assistant.
@@ -24,107 +24,101 @@ Return ONLY valid JSON in this exact shape:
 {
   "definition": "one short definition (max 14 words)",
   "examples": ["short example", "short example"],
-  "ru": "Russian term first, then optional short explanation"
+  "ru": "TERM FIRST in Russian, optional explanation in parentheses"
 }
 
 Rules:
 - Aviation meaning if relevant
-- Definition: max 14 words, simple English
-- Examples: exactly 2, short, aviation context
+- Simple English
+- Definition max 14 words
+- Exactly 2 short examples
 - Russian must be Cyrillic
-- ru MUST start with the standard Russian aviation term (TERM FIRST)
-- If helpful, add a very short explanation in parentheses after the term
+- ru MUST start with the standard Russian aviation term
+- Optional explanation in parentheses
 - No extra text
 - No markdown
 `;
 
-    const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
-      messages: [
-        { role: "system", content: systemPrompt.trim() },
-        { role: "user", content: `Word: "${word}"` },
-      ],
-      max_output_tokens: 240,
-    });
+    const result = await env.AI.run(
+      "@cf/meta/llama-3.1-8b-instruct-fast",
+      {
+        messages: [
+          { role: "system", content: systemPrompt.trim() },
+          { role: "user", content: `Word: "${word}"` },
+        ],
+        max_output_tokens: 220,
+      }
+    );
 
     let data;
     const raw = (result?.response || "").trim();
     try {
       data = JSON.parse(raw);
     } catch {
-      return json({ error: "AI returned invalid JSON", raw }, 502, request);
+      // If model breaks, still return a safe response
+      return json(
+        {
+          definition: "",
+          examples: [],
+          ru: forcedRu ? `${forcedRu}${forcedSuffix}` : "",
+        },
+        200
+      );
     }
 
-    // Normalize
+    // Normalize fields
     data.definition = String(data.definition || "").trim();
     data.examples = Array.isArray(data.examples)
-      ? data.examples.map((x) => String(x || "").trim()).filter(Boolean).slice(0, 2)
+      ? data.examples.map((x) => String(x).trim()).slice(0, 2)
       : [];
     data.ru = String(data.ru || "").trim();
 
-    // Fix classic mojibake ONLY when it looks like mojibake
-    if (looksLikeMojibakeLatin1(data.ru)) {
-      data.ru = fixLatin1Mojibake(data.ru).trim();
+    // If model returned mojibake like "Ð¥Ð²..."
+    if (looksLikeMojibake(data.ru)) {
+      data.ru = fixMojibake(data.ru).trim();
     }
 
-    // Enforce TERM FIRST with a glossary override for common terms
-    const forcedRu = aviationRuTerm(w);
+    // Final authority: glossary wins
     if (forcedRu) {
-      data.ru = `${forcedRu}${defaultExplanationSuffix(w)}`;
-    } else {
-      // If model ru is not Cyrillic, keep it safe
-      if (!containsCyrillic(data.ru)) {
-        data.ru = "Термин (нет надежного перевода)";
-      }
+      data.ru = `${forcedRu}${forcedSuffix}`;
+    } else if (!containsCyrillic(data.ru)) {
+      // Never return garbage
+      data.ru = "";
     }
 
-    return json(data, 200, request);
+    return json(data, 200);
   } catch (e) {
-    return json({ error: "Unhandled exception", message: e?.message || String(e) }, 500, request);
+    return json({ error: "Unhandled exception" }, 500);
   }
 }
 
-function json(obj, status, request) {
-  const headers = corsHeaders(request);
-  headers.set("content-type", "application/json; charset=utf-8");
-  return new Response(JSON.stringify(obj), { status, headers });
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
 }
 
-function corsHeaders(request) {
-  const origin = request.headers.get("Origin") || "";
-  const headers = new Headers();
+/* ---------- helpers ---------- */
 
-  // Allow your deployed site + local dev
-  const allowed =
-    origin === "https://pilot-vocab-cards.pages.dev" ||
-    /^http:\/\/localhost:\d+$/.test(origin) ||
-    /^http:\/\/127\.0\.0\.1:\d+$/.test(origin);
-
-  if (allowed) {
-    headers.set("Access-Control-Allow-Origin", origin);
-  }
-
-  headers.set("Access-Control-Allow-Methods", "GET,OPTIONS");
-  headers.set("Access-Control-Allow-Headers", "Content-Type");
-  headers.set("Access-Control-Max-Age", "86400");
-  return headers;
+function looksLikeMojibake(s) {
+  return /[ÐÑÃ]/.test(s);
 }
 
-function looksLikeMojibakeLatin1(s) {
-  return /[ÐÑÃâ€“â€”]/.test(String(s || ""));
-}
-
-function fixLatin1Mojibake(str) {
+function fixMojibake(str) {
   try {
-    const bytes = new Uint8Array([...str].map((c) => c.charCodeAt(0) & 0xff));
-    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    const bytes = new Uint8Array([...str].map((c) => c.charCodeAt(0)));
+    return new TextDecoder("utf-8").decode(bytes);
   } catch {
     return str;
   }
 }
 
 function containsCyrillic(s) {
-  return /[А-Яа-яЁё]/.test(String(s || ""));
+  return /[А-Яа-яЁё]/.test(s);
 }
+
+/* ---------- aviation glossary (TERM FIRST) ---------- */
 
 function aviationRuTerm(w) {
   const map = {
@@ -141,6 +135,7 @@ function aviationRuTerm(w) {
     throttle: "Рычаг газа",
     mixture: "Рычаг смеси",
     propeller: "Воздушный винт",
+    manifold: "Впускной коллектор",
   };
   return map[w] || "";
 }
