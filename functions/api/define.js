@@ -1,3 +1,16 @@
+import { PILOT_TERMS } from "./pilot_terms.js";
+
+const normalizeTerm = (raw) =>
+  String(raw || "")
+    .toLowerCase()
+    .replace(/\./g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const PILOT_TERMS_NORMALIZED = new Set(
+  Array.from(PILOT_TERMS, (term) => normalizeTerm(term)).filter(Boolean)
+);
+
 export async function onRequestGet({ request, env }) {
   try {
     const url = new URL(request.url);
@@ -5,7 +18,13 @@ export async function onRequestGet({ request, env }) {
     if (!wordRaw) return json({ error: "Missing word" }, 400);
 
     const word = wordRaw.slice(0, 64);
+    const normalizedWord = normalizeTerm(word);
+    const isPilotTerm = normalizedWord && PILOT_TERMS_NORMALIZED.has(normalizedWord);
     if (!env?.AI) return json({ error: "Workers AI binding missing" }, 500);
+
+    const domainHint = isPilotTerm
+      ? "The word is in the pilot glossary. Use the precise aviation meaning."
+      : "The word is not in the pilot glossary. Use the best general meaning.";
 
     const systemPrompt = `
 You are a vocabulary assistant.
@@ -17,8 +36,7 @@ Return ONLY valid JSON in this exact shape:
 }
 
 Rules:
-- If the word is aviation related, use the aviation meaning.
-- If not aviation related, give the best general meaning.
+- ${domainHint}
 - Simple English only.
 - Exactly 2 examples.
 - No extra keys.
