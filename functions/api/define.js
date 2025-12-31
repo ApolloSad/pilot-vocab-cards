@@ -1,15 +1,49 @@
-import { PILOT_TERMS } from "./pilot_terms.js";
+import { PILOT_GLOSSARY } from "./pilot_glossary.js";
 
 const normalizeTerm = (raw) =>
   String(raw || "")
     .toLowerCase()
+    .replace(/[“”"]/g, "")
+    .replace(/[’']/g, "'")
+    .replace(/[–—]/g, "-")
     .replace(/\./g, "")
     .replace(/\s+/g, " ")
     .trim();
 
-const PILOT_TERMS_NORMALIZED = new Set(
-  Array.from(PILOT_TERMS, (term) => normalizeTerm(term)).filter(Boolean)
-);
+const termVariants = (normalized) => {
+  const variants = new Set([normalized]);
+
+  if (normalized.includes("-")) {
+    variants.add(normalized.replace(/-/g, " "));
+    variants.add(normalized.replace(/-/g, ""));
+  }
+
+  if (normalized.includes("/")) {
+    variants.add(normalized.replace(/\//g, " "));
+    variants.add(normalized.replace(/\//g, ""));
+  }
+
+  if (normalized.endsWith("ies") && normalized.length > 4) {
+    variants.add(normalized.replace(/ies$/, "y"));
+  } else if (normalized.endsWith("es") && normalized.length > 3) {
+    variants.add(normalized.replace(/es$/, ""));
+  } else if (normalized.endsWith("s") && normalized.length > 3) {
+    variants.add(normalized.replace(/s$/, ""));
+  }
+
+  return Array.from(variants).filter(Boolean);
+};
+
+const getPilotDefinition = (word) => {
+  const normalized = normalizeTerm(word);
+  if (!normalized) return "";
+  const variants = termVariants(normalized);
+  for (const key of variants) {
+    const def = PILOT_GLOSSARY.get(key);
+    if (def) return def;
+  }
+  return "";
+};
 
 export async function onRequestGet({ request, env }) {
   try {
@@ -18,9 +52,17 @@ export async function onRequestGet({ request, env }) {
     if (!wordRaw) return json({ error: "Missing word" }, 400);
 
     const word = wordRaw.slice(0, 64);
-    const normalizedWord = normalizeTerm(word);
-    const isPilotTerm = normalizedWord && PILOT_TERMS_NORMALIZED.has(normalizedWord);
-    if (!env?.AI) return json({ error: "Workers AI binding missing" }, 500);
+    const pilotDefinition = getPilotDefinition(word);
+    const isPilotTerm = Boolean(pilotDefinition);
+    if (!env?.AI) {
+      if (pilotDefinition) {
+        return json(
+          { definition: pilotDefinition, examples: ensureTwoExamples([], word) },
+          200
+        );
+      }
+      return json({ error: "Workers AI binding missing" }, 500);
+    }
 
     const domainHint = isPilotTerm
       ? "The word is in the pilot glossary. Use the precise aviation meaning."
@@ -37,6 +79,7 @@ Return ONLY valid JSON in this exact shape:
 
 Rules:
 - ${domainHint}
+- If a definition is provided, return it verbatim as the definition.
 - Simple English only.
 - Exactly 2 examples.
 - No extra keys.
@@ -47,7 +90,12 @@ Rules:
     const result = await env.AI.run("@cf/meta/llama-3.1-8b-instruct-fast", {
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: `Word: "${word}"` },
+        {
+          role: "user",
+          content: pilotDefinition
+            ? `Word: "${word}"\nDefinition: "${pilotDefinition}"`
+            : `Word: "${word}"`,
+        },
       ],
       max_output_tokens: 220,
     });
@@ -62,10 +110,16 @@ Rules:
     try {
       data = JSON.parse(raw);
     } catch {
+      if (pilotDefinition) {
+        return json(
+          { definition: pilotDefinition, examples: ensureTwoExamples([], word) },
+          200
+        );
+      }
       return json({ error: "Model returned non-JSON" }, 502);
     }
 
-    const payload = normalizePayload(data, word);
+    const payload = normalizePayload(data, word, pilotDefinition);
 
     if (!payload.definition) {
       return json({ error: "Empty definition from model" }, 502);
@@ -87,8 +141,10 @@ function json(obj, status = 200) {
   });
 }
 
-function normalizePayload(data, word) {
-  const def = clampWords(String(data?.definition || "").trim(), 14);
+function normalizePayload(data, word, definitionOverride = "") {
+  const def = definitionOverride
+    ? String(definitionOverride || "").trim()
+    : clampWords(String(data?.definition || "").trim(), 14);
 
   const ex = Array.isArray(data?.examples) ? data.examples : [];
   let examples = ex
